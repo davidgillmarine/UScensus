@@ -1,0 +1,1061 @@
+---
+title: "Census data matching"
+author: "David Gill"
+date: "July 20, 2017"
+output: html_document
+---
+
+## R Markdown
+
+In this script I will match MPA and non-MPA communities to assess impacts using three different techniques recommended by Louise. The data used here are:
+
+* Brown LTDB + GIS distance data (Cities, shore)-*beaches to be included*
+* Distance table (distance between census tracts and all MPAs within 25km)
+
+*for using the sf package, see:
+
+* http://pierreroudier.github.io/teaching/20170626-Pedometrics/20170626-soil-data.html
+* https://ryanpeek.github.io/mapping_in_R/spatial_linepoly.html
+
+```{r eval=T}
+####Call relevant packages
+library(Matching) # matching package
+library(rbounds)  # Rosenbaum sensivity analysis
+library(geosphere)# to measure geodesic distances (between control and treatment sites)
+#library(maps)     # to plot dropped sites
+#library(rgdal)    # to plot dropped sites
+library(sf)
+#library(Rmisc)
+#library(rgeos)
+library(rio)      # importing files
+library(tidyverse)
+library(cowplot)
+datadir1 <- 'D:/My Documents/Important Files/Work/SESYNC/GIS/US Census/'
+datadir2 <- 'C:/Users/dgill6/Dropbox/data/analysis/UScensus/data/'
+
+# Plots and summary functions 
+pd <- position_dodge(0.05) # move them .05 to the left and right
+source("C:/Users/dgill6/Dropbox/data/analysis//MPAderivatives/git/my_summary_plot_functions.R")
+```
+
+#### Arranging the data
+```{r eval=F}
+
+#Pts <- as.data.frame(gCentroid(Tdata,byid=TRUE))
+#names(Pts) <- c('long','lat')
+#Tdata<- cbind(as.data.frame(Tdata),Pts)
+# write.csv(Tdata,paste0(datadir1,'Hawaii_test/data.csv', row.names = F)
+#data <- read.csv('E:/My Documents/Important Files/Work/SESYNC/GIS/US Census/Hawaii_test/data.csv',header = T)
+```
+
+## Read in data, determining MPA/non-MPA sites
+
+Using the near table which lists MPAs within a 25 km radius, I identify both MPA/non-MPA census tracts based on distance (within 5km) and year (i.e. only identify a site as an MPA site if the MPA was established 5 years before the census)
+
+For each time step, see which of the MPA sites were actually MPA sites
+
+```{r eval=T}
+#data <- read.csv('Hawaii_test/data.csv',header = T)
+
+# State info
+StateFIPS <- import(paste0(datadir2,'StateFIPS.csv')) %>% 
+  rename(STATEFP10="FIPS Code",
+         state.abbr="State Abbreviation",
+         state.nam="State Name") %>% 
+  mutate(STATEFP10=as.character(STATEFP10))
+
+
+# LTDB census data
+data <- st_read(paste0(datadir2,'Brown LTDB'),'1970-2010LTDBcoastal1',stringsAsFactors = FALSE) 
+data <- data %>% 
+  left_join(StateFIPS,by='STATEFP10') %>% 
+  mutate(Popdens70 = pop70/Tract_Area,
+         BchIndex = BEACH_DIST*data$BchLgth_km)
+
+#data <-st_centroid(Tdata,of_largest_polygon = FALSE)
+# plot(st_geometry(data)) # just the points
+# plot(data['pop10'])
+
+# MPA info & distances
+MPAdist <- import(paste0(datadir2,'CoastalLTDB_MPAdist25k.dbf')) %>% 
+  select(GEOID,NEAR_FID,NEAR_DIST,MPA,ESTYR) %>% 
+  filter(NEAR_DIST<5000) %>% 
+  mutate(GEOID=as.character(GEOID))
+# for MPAs with no establishment year, will impute the median est yr for now (n=58/3132)
+  sum(MPAdist$ESTYR==0)
+  MPAdist$ESTYR[MPAdist$ESTYR==0] <- median(MPAdist$ESTYR[MPAdist$ESTYR>0])
+head(MPAdist); hist(MPAdist$ESTYR) 
+
+# # Find MPA tracts:where an MPA was established near the tract at least 5 years before census
+MPAsite <- unique(MPAdist$GEOID)
+MPAsites70 <- unique(MPAdist$GEOID[MPAdist$ESTYR<=1965])
+MPAsites80 <- unique(MPAdist$GEOID[MPAdist$ESTYR<=1975])
+MPAsites90 <- unique(MPAdist$GEOID[MPAdist$ESTYR<=1985])
+MPAsites00 <- unique(MPAdist$GEOID[MPAdist$ESTYR<=1995])
+MPAsites10 <- unique(MPAdist$GEOID[MPAdist$ESTYR<=2005])
+
+dec.data <- data %>% 
+  select(-NEAR_FID,-NEAR_DIST) %>% 
+  mutate(Tr=ifelse(GEOID10%in%MPAsite,1,0),
+         mpa70=ifelse(GEOID10%in%MPAsites70,1,0),
+         mpa80=ifelse(GEOID10%in%MPAsites80,1,0),
+         mpa90=ifelse(GEOID10%in%MPAsites90,1,0),
+         mpa00=ifelse(GEOID10%in%MPAsites00,1,0),
+         mpa10=ifelse(GEOID10%in%MPAsites10,1,0)) %>% 
+         filter(SHORE_DIST<5000) %>% 
+  st_centroid(of_largest_polygon = FALSE) %>% 
+  # add centroid values 
+mutate(lon=map_dbl(geometry, ~st_centroid(.x)[[1]]),
+       lat=map_dbl(geometry, ~st_centroid(.x)[[2]]))
+
+# test <-dec.data%>% filter(state.abbr=="HI")
+# plot(test['mpa10']) # takes some time
+st_geometry(dec.data) <- NULL # convert to dataframe
+colSums(select(dec.data,Tr:mpa10)==1)/nrow(dec.data)
+
+#MPAdist2 <- distinct(MPAdist,MPA,.keep_all = T)
+#hist(MPAdist2$ESTYR,xlim=c(1900,2020), breaks = seq(0,2030,10))
+# # Remove sites close to an MPA where MPA establishment date is unknown or more than one MPA
+# badMPA <- unique(MPAdist2$GEOID[MPAdist$NEAR_DIST<5000 & MPAdist$ESTYR<1900])
+# MPAdist2 <- MPAdist[MPAdist$NEAR_DIST<5000 & MPAdist$ESTYR>1900,]
+# duplMPA <- MPAdist2$GEOID[duplicated(MPAdist2$GEOID)]
+# data1 <- subset(data,!data$GEOID%in%c(badMPA,duplMPA))
+# 
+# # Number of MPAs
+# length(unique(MPAdist$MPA[MPAdist$NEAR_DIST<5000 & MPAdist$ESTYR>0]))
+# 
+# mpa.age <- import(paste0(datadir1,'CoastalLTDB_MPAdist25k.dbf')) %>% 
+#   filter(NEAR_DIST<5000) %>% 
+#   select(GEOID,NEAR_FID,NEAR_DIST,MPA,ESTYR) %>% 
+#   add_count(GEOID) %>% 
+#   group_by(GEOID) %>% 
+#   summarise(est.yr=min(ESTYR)) %>% 
+#   mutate(GEOID=as.character(GEOID)) 
+# head(mpa.age); summary(mpa.age$est.yr)
+# 
+# coastaldata <- data %>% 
+#   select(-NEAR_FID,-NEAR_DIST) %>% 
+#   left_join(mpa.age,by=c("GEOID10"="GEOID")) 
+# st_geometry(coastaldata) <- NULL # convert to dataframe
+# 
+# hinc.data.tr <- coastaldata %>% 
+#   select(GEOID10,"State Name","State Abbreviation",est.yr,hinc70,hinc80,hinc90,hinc00,hinc10)  %>% 
+#   gather(decade,hinc,hinc70:hinc10) %>% 
+#   mutate(decade=gsub("hinc","19",decade),
+#          decade=gsub("1900","2000",decade),
+#          decade=as.numeric(gsub("1910","2010",decade)),
+#          mpa.age=decade-est.yr,
+#          Tr="MPA") %>% 
+#   filter(mpa.age<150 & !is.na(hinc))
+# head(hinc.data.tr)
+# hinc.data.ctrl <- coastaldata %>% 
+#   select(GEOID10,"State Name","State Abbreviation",est.yr,hinc70,hinc80,hinc90,hinc00,hinc10)  %>% 
+#   gather(decade,hinc,hinc70:hinc10) %>% 
+#   mutate(decade=gsub("hinc","19",decade),
+#          decade=gsub("1900","2000",decade),
+#          decade=as.numeric(gsub("1910","2010",decade)),
+#          mpa.age=decade-1970,
+#          Tr="non-MPA") %>% 
+#   filter(is.na(est.yr)) %>% 
+#   group_by("State Name",Tr,mpa.age) %>% 
+#   summarise(hinc=mean(hinc))
+# head(hinc.data.ctrl)
+# 
+# hinc.data <- bind_rows(hinc.data.ctrl,hinc.data.tr)
+# 
+# ggplot(hinc.data.tr,aes(x=mpa.age,y=hinc))+geom_smooth(method="lm",aes(color="MPA"))+
+#   geom_line(data=hinc.data.ctrl,aes(color="non-MPA"))+
+#   labs(title="HH hincome", x="MPA age", y="HH income",color="Legend text")
+
+```
+## Matching function
+``` {r eval=T}
+# get the date of the first MPA (within 5 km)
+mpa.age <- import(paste0(datadir2,'CoastalLTDB_MPAdist25k.dbf')) %>% 
+  filter(NEAR_DIST<5000) %>% 
+  select(GEOID,NEAR_FID,NEAR_DIST,MPA,ESTYR) %>% 
+  add_count(GEOID) %>% 
+  group_by(GEOID) %>% 
+  summarise(est.yr=min(ESTYR)) %>% 
+  mutate(GEOID=as.character(GEOID)) 
+head(mpa.age); summary(mpa.age$est.yr)
+
+census.match<- function(.data){
+  Tr <- .data %>% pull(mpa10)
+  X<-.data %>% 
+    select(lat,lon, hinc70,punemp70,mhmval70,Popdens70,pprof70,CITY_DIST,SHORE_DIST,BchIndex,STATEFP10) %>% 
+    mutate(STATEFP10=as.integer(STATEFP10))
+  
+  #Malanobis matching
+  head(X)
+  # Create caliper and say which matches should be exact
+  # Caliper controls permissable match. Depth: matches only sites surveyed within a moving 10m window, SurveyYear:3 year window, Latitude: 2 degrees
+  Xcaliper<-c(rep(1,10),100) # everything within 1 sd for now 
+  Xexact<-c(rep(0,10),1)  # exact matching on state
+  
+  # Match
+  m2<-Match(Y=NULL, Tr,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+  summary(m2)
+  
+  #Match balance
+#  mb2<-MatchBalance(Tr~lat+lon+ hinc70+punemp70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BchIndex,
+#                    data=.data,match.out=m2,ks=TRUE, nboots=1000,digits=3)
+  
+  # get row indices and then GEOID10s
+  i.treat<-m2$index.treated
+  i.control<-m2$index.control  
+  MPA.pairs <- as.data.frame(cbind(.data[i.treat,c("GEOID10")],.data[i.control,c("GEOID10")]))
+  names(MPA.pairs) <- c('treat.id','ctrl.id')
+  
+  # join Tr and Ctrl values, calc. response ratios
+  var.names <- c("ppov70","ppov80","ppov90","ppov00","ppov10",
+                 "hinc70","hinc80","hinc90","hinc00","hinc10",
+                 "pcol70","pcol80","pcol90","pcol00","pcol10",
+                 "pflabf70","pflabf80","pflabf90","pflabf00","pflabf10",
+                 "punemp70","punemp80","punemp90","punemp00","punemp10")
+  
+  matched.data <- MPA.pairs %>% 
+    left_join(select(.data,GEOID10,state.abbr,state.nam,var.names), by=c("treat.id"="GEOID10")) %>% 
+    rename_at(vars(var.names),funs(paste0("T",var.names))) %>% 
+    left_join(select(.data,GEOID10,var.names), by=c("ctrl.id"="GEOID10")) %>% 
+    rename_at(vars(var.names),funs(paste0("C",var.names))) %>% 
+    mutate( lnRR.ppov70=log(Tppov70/Cppov70),
+            lnRR.ppov80=log(Tppov80/Cppov80),
+            lnRR.ppov90=log(Tppov90/Cppov90),
+            lnRR.ppov00=log(Tppov00/Cppov00),
+            lnRR.ppov10=log(Tppov10/Cppov10),
+            lnRR.hinc70=log(Thinc70/Chinc70),
+            lnRR.hinc80=log(Thinc80/Chinc80),
+            lnRR.hinc90=log(Thinc90/Chinc90),
+            lnRR.hinc00=log(Thinc00/Chinc00),
+            lnRR.hinc10=log(Thinc10/Chinc10),
+            lnRR.pcol70=log(Tpcol70/Cpcol70),
+            lnRR.pcol80=log(Tpcol80/Cpcol80),
+            lnRR.pcol90=log(Tpcol90/Cpcol90),
+            lnRR.pcol00=log(Tpcol00/Cpcol00),
+            lnRR.pcol10=log(Tpcol10/Cpcol10),
+            lnRR.pflabf70=log(Tpflabf70/Cpflabf70),
+            lnRR.pflabf80=log(Tpflabf80/Cpflabf80),
+            lnRR.pflabf90=log(Tpflabf90/Cpflabf90),
+            lnRR.pflabf00=log(Tpflabf00/Cpflabf00),
+            lnRR.pflabf10=log(Tpflabf10/Cpflabf10),
+            lnRR.punemp70=log(Tpunemp70/Cpunemp70),
+            lnRR.punemp80=log(Tpunemp80/Cpunemp80),
+            lnRR.punemp90=log(Tpunemp90/Cpunemp90),
+            lnRR.punemp00=log(Tpunemp00/Cpunemp00),
+            lnRR.punemp10=log(Tpunemp10/Cpunemp10)) %>% 
+    # dplyr::select(-c(ctrl.id,Tppov70:Cpcol10)) %>% 
+    rename(GEOID10="treat.id") 
+ # head(matched.data)
+  
+  # Distance between control and treatment sites
+  T.Loc<-.data[i.treat,c('lon','lat')]
+  C.Loc<-.data[i.control,c('lon','lat')]
+  matched.data$match.dist.km<-(distGeo(T.Loc,C.Loc))/1000
+  summary(matched.data$match.dist.km);hist(matched.data$match.dist.km)
+  
+  # filter out sites too close to treatment (spillover)
+  matched.data <- matched.data %>% filter(match.dist.km>5)
+  
+  matched.data <<- matched.data %>% 
+    left_join(mpa.age,by=c("GEOID10"="GEOID")) 
+}
+```
+
+### Plots
+#### Naiive comparison
+```{r eval=F}
+myColors <- matrix(c('deepskyblue3','darkblue'),nrow=1)
+colnames(myColors) <- c("non-MPA","MPA")
+colScale <- scale_colour_manual(name = "Tr",values = myColors,breaks=c("non-MPA","MPA"))
+
+# Poverty
+bind_rows(my_summarize(dec.data,ppov70,mpa70) %>% mutate(est.dec='1970') %>% rename(Tr=mpa70,ppov=ppov70),
+          my_summarize(dec.data,ppov80,mpa80) %>% mutate(est.dec='1980') %>% rename(Tr=mpa80,ppov=ppov80),
+          my_summarize(dec.data,ppov90,mpa90) %>% mutate(est.dec='1990') %>% rename(Tr=mpa90,ppov=ppov90),
+          my_summarize(dec.data,ppov00,mpa00) %>% mutate(est.dec='2000') %>% rename(Tr=mpa00,ppov=ppov00),
+          my_summarize(dec.data,ppov10,mpa10) %>% mutate(est.dec='2010') %>% rename(Tr=mpa10,ppov=ppov10)) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(est.dec,ppov,col=Tr,group=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0) +
+  geom_point()+geom_line() + 
+  labs(x='Census year',y=' % poverty',title="% Poverty") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.title = element_blank(),
+  plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5)) +
+  guides(colour = guide_legend(reverse=T)) +
+  colScale
+
+# HH income
+bind_rows(my_summarize(dec.data,hinc70,mpa70) %>% mutate(est.dec='1970') %>% rename(Tr=mpa70,hinc=hinc70),
+          my_summarize(dec.data,hinc80,mpa80) %>% mutate(est.dec='1980') %>% rename(Tr=mpa80,hinc=hinc80),
+          my_summarize(dec.data,hinc90,mpa90) %>% mutate(est.dec='1990') %>% rename(Tr=mpa90,hinc=hinc90),
+          my_summarize(dec.data,hinc00,mpa00) %>% mutate(est.dec='2000') %>% rename(Tr=mpa00,hinc=hinc00),
+          my_summarize(dec.data,hinc10,mpa10) %>% mutate(est.dec='2010') %>% rename(Tr=mpa10,hinc=hinc10),
+          ) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(est.dec,hinc,col=Tr,group=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0) +
+  geom_point()+geom_line() + 
+  labs(x='Census year',y='HH income',title="Household income") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+  plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5)) +
+  guides(colour = guide_legend(reverse=T)) +
+  colScale
+
+# HH income (Hawaii)
+hwi.data <- filter(dec.data,state.abbr=="HI")
+(hwi.tseries.hinc <-  
+    bind_rows(my_summarize(hwi.data,hinc70,mpa70) %>% mutate(est.dec='1970') %>%rename(Tr=mpa70,hinc=hinc70),
+              my_summarize(hwi.data,hinc80,mpa80) %>% mutate(est.dec='1980') %>% rename(Tr=mpa80,hinc=hinc80),
+              my_summarize(hwi.data,hinc90,mpa90) %>% mutate(est.dec='1990') %>% rename(Tr=mpa90,hinc=hinc90),
+              my_summarize(hwi.data,hinc00,mpa00) %>% mutate(est.dec='2000') %>% rename(Tr=mpa00,hinc=hinc00),
+              my_summarize(hwi.data,hinc10,mpa10) %>% mutate(est.dec='2010') %>% rename(Tr=mpa10,hinc=hinc10)) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(est.dec,hinc,col=Tr,group=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0) +
+  geom_point()+geom_line() + 
+  labs(x='Census year',y='HH income',title="Household income", subtitle="Hawaii") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),legend.title = element_blank(), 
+  plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5)) +
+  guides(colour = guide_legend(reverse=T)) +
+  colScale)
+ggsave(paste0(datadir2,"prelim_plots_naiive_hinc_hwi.png"),width = 5,height = 3)
+```
+#### Bias in baseline conditions
+``` {r eval=T}
+# Baseline poverty and MPA establishment (Hawaii)
+myColors <- matrix(c('deepskyblue3','darkblue'),nrow=1)
+colnames(myColors) <- c("non-MPA","MPA")
+colScale <- scale_colour_manual(name = "Tr",values = myColors,breaks=c("non-MPA","MPA"))
+                            
+(hwi.bslne.ppov <-  my_summarize(hwi.data,ppov70,Tr) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(Tr,ppov70,colour=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0, position = pd) +
+  geom_point() +
+  labs(x='Group',y='% poverty',title="Poverty") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  plot.title = element_text(hjust = 0.5),legend.position="none") +
+  colScale)
+  
+(hwi.bslne.hinc <-  my_summarize(hwi.data,hinc70,Tr) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(Tr,hinc70,colour=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0, position = pd) +
+  geom_point() +
+  labs(x='Group',y='$ dollars',title="Household income") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  plot.title = element_text(hjust = 0.5),legend.position="none") +
+  colScale)
+  
+(hwi.bslne.col <- my_summarize(hwi.data,pcol70,Tr) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(Tr,pcol70,colour=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0, position = pd) +
+  geom_point() +
+  labs(x='Group',y='% attainment',title="College Education") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  plot.title = element_text(hjust = 0.5),legend.position="none") +
+  colScale)
+
+(hwi.bslne.fplf <-  my_summarize(hwi.data,pflabf70,Tr) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  ggplot(aes(Tr,pflabf70,colour=Tr)) +
+  geom_errorbar(aes(ymin=ci_lower, ymax=ci_upper), width=0, position = pd) +
+  geom_point() +
+  labs(x='Group',y='% participation',title="Female labor force particip.") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+  plot.title = element_text(hjust = 0.5),legend.position="none") +
+  colScale)
+
+plot_grid(hwi.bslne.hinc,hwi.bslne.ppov,hwi.bslne.col,hwi.bslne.fplf, ncol = 2, nrow = 2, hjust=-1)
+
+ggsave(paste0(datadir2,"prelim_plots_baseline_bias_hwi.png"),width = 6,height = 4)
+```
+#### Matched trends
+* Match by baseline year
+* At each time step, include/exclude based on whether or not the pair includes a treatment site
+```{r eval=F}
+colScale <- scale_colour_manual(name = "Tr",values = rev(myColors),breaks=c("non-MPA","MPA"))
+
+### All states
+census.match(dec.data %>% filter(hinc70>0))
+#dec.data %>% filter(state.abbr=="HI")
+
+# Discontinuity plot- HH income: all states
+hinc.data.tr <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Thinc70,Thinc80,Thinc90,Thinc00,Thinc10)  %>% 
+  gather(decade,hinc,Thinc70:Thinc10) %>% 
+  mutate(decade=gsub("Thinc","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="MPA") %>% 
+  filter(mpa.age<150 & !is.na(hinc))
+hinc.data.ctrl <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Chinc70,Chinc80,Chinc90,Chinc00,Chinc10)  %>% 
+  gather(decade,hinc,Chinc70:Chinc10) %>% 
+  mutate(decade=gsub("Chinc","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="non-MPA") %>% 
+  filter(mpa.age<150 & !is.na(hinc))
+
+hinc.data <- bind_rows(hinc.data.ctrl,hinc.data.tr)
+pl.range <- as.integer(paste(quantile(hinc.data$mpa.age,c(.05, .95))))
+
+(hinc.matched <- ggplot(hinc.data,aes(x=mpa.age,y=hinc,col=Tr)) + geom_smooth(method = 'loess') +
+  labs(title="HH income", x="MPA age", y="HH income: All states",color="Tr") +
+  xlim(pl.range) +
+  geom_vline(aes(xintercept=0)) +
+  theme_bw() +
+  theme(panel.background = element_blank(), panel.grid.major = element_blank(), legend.title = element_blank(),
+  panel.grid.minor =element_blank(),plot.title = element_text(size=11,face = "bold"))+
+  guides(colour = guide_legend(reverse=T)) +
+  colScale)
+ggsave(paste0(datadir2,"prelim_plots_matched_hinc_allstates.png"),width = 7,height = 4)
+
+
+# Discontinuity plot- HH income: Hawaii
+census.match(dec.data %>% filter(state.abbr=="HI", hinc70>0))
+
+# Discontinuity plot- HH income: all states
+hinc.data.tr <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Thinc70,Thinc80,Thinc90,Thinc00,Thinc10)  %>% 
+  gather(decade,hinc,Thinc70:Thinc10) %>% 
+  mutate(decade=gsub("Thinc","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="MPA") %>% 
+  filter(mpa.age<150 & !is.na(hinc))
+head(hinc.data.tr)
+
+hinc.data.ctrl <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Chinc70,Chinc80,Chinc90,Chinc00,Chinc10)  %>% 
+  gather(decade,hinc,Chinc70:Chinc10) %>% 
+  mutate(decade=gsub("Chinc","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="non-MPA") %>% 
+  filter(mpa.age<150 & !is.na(hinc))
+
+hinc.data <- bind_rows(hinc.data.ctrl,hinc.data.tr)
+pl.range <- as.integer(paste(quantile(hinc.data$mpa.age,c(.05, .95))))
+
+(hinc.matched.hwi <- ggplot(hinc.data,aes(x=mpa.age,y=hinc,col=Tr)) + geom_smooth(method = 'loess') +
+  labs(title="HH income: Hawaii", x="MPA age", y="HH income",color="Tr") +
+  xlim(pl.range) +
+  geom_vline(aes(xintercept=0)) +
+  theme_bw() +
+  theme(panel.background = element_blank(), panel.grid.major = element_blank(), legend.title = element_blank(),
+  panel.grid.minor =element_blank(),plot.title = element_text(size=11,face = "bold"))+
+  guides(colour = guide_legend(reverse=T)) +
+  colScale)
+ggsave(paste0(datadir2,"prelim_plots_matched_hinc_hwi.png"),width = 7,height = 4)
+
+### All states: poorest quintile
+data <- dec.data %>% 
+  filter(ppov70>0) %>% 
+  filter(ppov70<quantile(ppov70,0.2))
+table(data$state.abbr[data$mpa10==1])
+census.match(data)
+
+ppov.data.tr <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Tppov70,Tppov80,Tppov90,Tppov00,Tppov10)  %>% 
+  gather(decade,ppov,Tppov70:Tppov10) %>% 
+  mutate(decade=gsub("Tppov","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="MPA") %>% 
+  filter(mpa.age<150 & !is.na(ppov))
+head(ppov.data.tr)
+
+ppov.data.ctrl <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Cppov70,Cppov80,Cppov90,Cppov00,Cppov10)  %>% 
+  gather(decade,ppov,Cppov70:Cppov10) %>% 
+  mutate(decade=gsub("Cppov","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="non-MPA") %>% 
+  filter(mpa.age<150 & !is.na(ppov))
+head(ppov.data.ctrl)
+summary(ppov.data.ctrl)
+
+ppov.data <- bind_rows(ppov.data.ctrl,ppov.data.tr)
+pl.range <- as.integer(paste(quantile(ppov.data$mpa.age,c(.1, .9))))
+
+(ppov.matched.pov <- ggplot(ppov.data,aes(x=mpa.age,y=ppov,col=Tr)) + geom_smooth(method = 'loess',fullrange=F) +
+  labs(title="HH income: lowest quintile", x="MPA age", y="HH income",color="Tr") +
+  xlim(pl.range) +
+  geom_vline(aes(xintercept=0)) +
+  theme_bw() +
+  theme(panel.background = element_blank(), panel.grid.major = element_blank(), 
+  panel.grid.minor =element_blank(),plot.title = element_text(size=11,face = "bold"))+
+  colScale)
+ggsave(paste0(datadir2,"prelim_plots_matched_pov_all_states.png"),width = 7,height = 4)
+
+### All states: poorest quintile
+data <- dec.data %>% 
+  filter(hinc70>0) %>% 
+  filter(hinc70<quantile(hinc70,0.2))
+table(data$state.abbr[data$mpa10==1])
+census.match(data)
+
+hinc.data.tr <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Thinc70,Thinc80,Thinc90,Thinc00,Thinc10)  %>% 
+  gather(decade,hinc,Thinc70:Thinc10) %>% 
+  mutate(decade=gsub("Thinc","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="MPA") %>% 
+  filter(mpa.age<150 & !is.na(hinc))
+head(hinc.data.tr)
+
+hinc.data.ctrl <- matched.data %>% 
+  select(GEOID10,state.abbr,est.yr,Chinc70,Chinc80,Chinc90,Chinc00,Chinc10)  %>% 
+  gather(decade,hinc,Chinc70:Chinc10) %>% 
+  mutate(decade=gsub("Chinc","19",decade),
+         decade=gsub("1900","2000",decade),
+         decade=as.numeric(gsub("1910","2010",decade)),
+         mpa.age=decade-est.yr,
+         Tr="non-MPA") %>% 
+  filter(mpa.age<150 & !is.na(hinc))
+head(hinc.data.ctrl)
+summary(hinc.data.ctrl)
+
+hinc.data <- bind_rows(hinc.data.ctrl,hinc.data.tr)
+pl.range <- as.integer(paste(quantile(hinc.data$mpa.age,c(.1, .9))))
+
+(hinc.matched.poor20 <- ggplot(hinc.data,aes(x=mpa.age,y=hinc,col=Tr)) + geom_smooth(method = 'loess',fullrange=F) +
+  labs(title="HH income: lowest quintile", x="MPA age", y="HH income",color="Tr") +
+  xlim(pl.range) +
+  geom_vline(aes(xintercept=0)) +
+  theme_bw() +
+  theme(panel.background = element_blank(), panel.grid.major = element_blank(), 
+  panel.grid.minor =element_blank(),plot.title = element_text(size=11,face = "bold"))+
+  colScale)
+ggsave(paste0(datadir2,"prelim_plots_matched_hinc_lowest_quint.png"),width = 7,height = 4)
+
+```
+
+
+
+
+#############################
+### Other plots
+``` {r eval=F}
+base.pov <- bind_rows(my_summarize(dec.data,ppov70,Tr) %>% mutate(est.dec='all'),
+          my_summarize(dec.data,ppov70,mpa70) %>% mutate(est.dec='1970s') %>% rename(Tr=mpa70),
+          my_summarize(dec.data,ppov70,mpa80) %>% mutate(est.dec='1980s') %>% rename(Tr=mpa80),
+          my_summarize(dec.data,ppov70,mpa90) %>% mutate(est.dec='1990s') %>% rename(Tr=mpa90),
+          my_summarize(dec.data,ppov70,mpa00) %>% mutate(est.dec='2000s') %>% rename(Tr=mpa00),
+          my_summarize(dec.data,ppov70,mpa10) %>% mutate(est.dec='2010s') %>% rename(Tr=mpa10),
+          ) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  my_pointplot_ci('Tr','ppov70',"Tr") +
+  labs(x='Site',y='1970 % poverty') +
+  facet_grid(.~est.dec)
+
+base.hinc <- bind_rows(my_summarize(coastaldata,hinc70,Tr) %>% mutate(est.dec='all'),
+          my_summarize(coastaldata,hinc70,mpa70) %>% mutate(est.dec='1970s') %>% rename(Tr=mpa70),
+          my_summarize(coastaldata,hinc70,mpa80) %>% mutate(est.dec='1980s') %>% rename(Tr=mpa80),
+          my_summarize(coastaldata,hinc70,mpa90) %>% mutate(est.dec='1990s') %>% rename(Tr=mpa90),
+          my_summarize(coastaldata,hinc70,mpa00) %>% mutate(est.dec='2000s') %>% rename(Tr=mpa00),
+          my_summarize(coastaldata,hinc70,mpa10) %>% mutate(est.dec='2010s') %>% rename(Tr=mpa10),
+          ) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  my_pointplot_ci('Tr','hinc70',"Tr") +
+  labs(x='Site',y='1970 HH income') +
+  facet_grid(.~est.dec)
+
+base.unemp <- bind_rows(my_summarize(coastaldata,punemp70,Tr) %>% mutate(est.dec='all'),
+          my_summarize(coastaldata,punemp70,mpa70) %>% mutate(est.dec='1970s') %>% rename(Tr=mpa70),
+          my_summarize(coastaldata,punemp70,mpa80) %>% mutate(est.dec='1980s') %>% rename(Tr=mpa80),
+          my_summarize(coastaldata,punemp70,mpa90) %>% mutate(est.dec='1990s') %>% rename(Tr=mpa90),
+          my_summarize(coastaldata,punemp70,mpa00) %>% mutate(est.dec='2000s') %>% rename(Tr=mpa00),
+          my_summarize(coastaldata,punemp70,mpa10) %>% mutate(est.dec='2010s') %>% rename(Tr=mpa10),
+          ) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  my_pointplot_ci('Tr','punemp70',"Tr") +
+  labs(x='Site',y='1970 % unemployment') +
+  facet_grid(.~est.dec)
+
+base.col <- bind_rows(my_summarize(coastaldata,pcol70,Tr) %>% mutate(est.dec='baseline') %>% rename(col.edu=pcol70),
+          my_summarize(coastaldata,pcol70,mpa70) %>% mutate(est.dec='1970s') %>% rename(col.edu=pcol70,Tr=mpa70),
+          my_summarize(coastaldata,pcol80,mpa80) %>% mutate(est.dec='1980s') %>% rename(col.edu=pcol80,Tr=mpa80),
+          my_summarize(coastaldata,pcol90,mpa90) %>% mutate(est.dec='1990s') %>% rename(col.edu=pcol90,Tr=mpa90),
+          my_summarize(coastaldata,pcol00,mpa00) %>% mutate(est.dec='2000s') %>% rename(col.edu=pcol00,Tr=mpa00),
+          my_summarize(coastaldata,pcol10,mpa10) %>% mutate(est.dec='2010s') %>% rename(col.edu=pcol10,Tr=mpa10),
+          ) %>% 
+  mutate(Tr=recode_factor(Tr,"0"="non-MPA","1"="MPA")) %>% 
+  my_pointplot_ci('Tr','col.edu',"Tr") +
+  labs(x='Site',y=' % college education') +
+  facet_grid(.~est.dec)
+
+
+library(ggmap)
+location=c(-121,39.5) # set the center of the map
+# set the background map up
+map1 <- get_map(location=USA, crop = F,
+             color="bw",
+             maptype="terrain",
+             source="google",
+             zoom=8)
+
+```
+
+Summary stats on MPA year (optional)
+```{r eval=F}
+MPAdist1 <- dplyr::distinct(subset(MPAdist,ESTYR>0 & NEAR_DIST<5000),MPA,.keep_all = T)
+head(MPAdist1)
+#Histogram of MPA establishment years
+ggplot(MPAdist1, aes(ESTYR)) +
+  geom_histogram(colour='black', fill = 'lightgrey',show.legend = F, binwidth = 5) +
+  theme(panel.background = element_blank()) +
+  theme_classic() +
+  xlab('Year') +
+  ylab('Number of MPAs') 
+  
+ggsave('C:/Users/LocalAdmin/Documents/Data analysis/US census/Establishment.png',width = 5,height = 3)
+summary(MPAdist1$ESTYR)
+
+#Percent after 1965
+sum(MPAdist1$ESTYR>1965)/nrow(MPAdist1)
+```
+
+
+### Subset and clean data
+```{r eval=F}
+# Select rows without missing or ambiguous data (0,-999)
+summary(data1[,c("hinc70","hinc80","hinc90","hinc00","hinc10")])
+nrow(subset(data1,hinc70==0));nrow(subset(data1,hinc80==0));nrow(subset(data1,hinc90==0));nrow(subset(data1,hinc00==0));nrow(subset(data1,hinc10==0))
+data2 <- subset(data1,hinc70>0 & hinc80>0 & hinc90>0 & hinc00>0 & hinc10>0)
+data2 <- subset(data2,SHORE_DIST<10000)
+```
+
+### Plots
+###### Time series
+```{r eval=F}
+# Gather by income census year
+data3 <-data2 %>% 
+  gather("hinc70","hinc80","hinc90","hinc00","hinc10", key = "Year", value = "HHIncome")
+
+# Check data
+summary(data3$HHIncome) 
+nrow(data2)*5==nrow(data3)
+
+# Prepare Year data 
+unique(data3$Year)
+data3$Year <- paste0('19',stringr::str_sub(data3$Year, -2, -1)) # create year variable
+data3$Year[data3$Year==1900]=2000 # fix 2000 and 2010
+data3$Year[data3$Year==1910]=2010
+unique(data3$Year)
+
+data3$MPA <- ifelse((data3$Year=='1970' & data3$MPA70==1) | (data3$Year=='1980' & data3$MPA80==1) |
+                    (data3$Year=='1990' & data3$MPA90==1) | (data3$Year=='2000' & data3$MPA00==1) |
+                    (data3$Year=='2010' & data3$MPA10==1),1,0)
+
+
+# Double check
+unique(data3$MPA[data3$Year=='2000' & data3$MPA00==1])
+nrow(subset(data1, MPA70==1));nrow(subset(data1,MPA80==1));nrow(subset(data1,MPA90==1));nrow(subset(data1,MPA00==1));nrow(subset(data1,MPA10==1))
+
+# Select columns
+data4 <- data3[,c("GEOID10","MPA","Year","HHIncome","State.Name")]
+table(data4$State.Name,data4$MPA)
+
+# summarise data
+data5 <- summarySE(data4, measurevar="HHIncome", groupvars=c("Year","MPA"))
+data5$MPA1 <- ifelse(data5$MPA==0,'non-MPA','MPA')
+data5
+
+# Set plot parameters
+pd <- position_dodge(width=.3) # move them .05 to the left and right
+myColors <- matrix(c('deepskyblue3','darkblue'),nrow=1)
+colnames(myColors) <- c("non-MPA","MPA")
+colScale <- scale_colour_manual(name = "Category",values = rev(myColors),breaks=c("non-MPA","MPA"))
+
+pMPAincome<- ggplot(data5, aes(x=Year, y=HHIncome, colour = factor(MPA1))) + 
+  geom_errorbar(aes(ymin=HHIncome-ci, ymax=HHIncome+ci), width=0, position = pd ) +
+  geom_point(size=2, position =pd)+ 
+  theme_bw() +
+  ylab('Household income ($)') +
+  xlab('Year\n n=9,763 tracts') +
+  geom_hline(aes(yintercept=0)) +
+  theme(panel.background = element_blank(), panel.grid.major = element_blank(), 
+  panel.grid.minor =element_blank(),plot.title = element_text(size=11,face = "bold")) +
+  colScale
+pMPAincome
+ggsave('C:/Users/LocalAdmin/Documents/Data analysis/US census/Naive_10k_shoredist.png',width = 5,height = 3)
+
+```
+
+# END
+###########################################################################################################################
+```
+{r eval=T}
+##Add MPA ID, selecting the oldest MPA if a tract is close to more than 1 MPA
+MPAdist2 <- MPAdist[MPAdist$NEAR_DIST<5000 & MPAdist$ESTYR>1900,]
+
+MPAdist2$GEOID10 <- MPAdist2$GEOID
+MPAdist3=MPAdist2[1,]
+MPAdist3=MPAdist3[-1,]
+for (i in unique(MPAdist2$GEOID10)){
+  A<-MPAdist2[MPAdist2$GEOID10==i,]  
+  A<-A[which(A$ESTYR==min(A$ESTYR)),]
+  MPAdist3=rbind(MPAdist3,A)
+}
+
+Mdata <- left_join(Mdata,MPAdist3, by='GEOID10')
+
+
+LnRR_biom70<-log(data2[i.treat,'hinc70']/data2[i.control,'hinc70'])  
+LnRR_biom80<-log(data2[i.treat,'hinc80']/data2[i.control,'hinc80'])  
+LnRR_biom90<-log(data2[i.treat,'hinc90']/data2[i.control,'hinc90'])  
+LnRR_biom00<-log(data2[i.treat,'hinc00']/data2[i.control,'hinc00'])  
+LnRR_biom10<-log(data2[i.treat,'hinc10']/data2[i.control,'hinc10'])  
+
+Mdata <- cbind(Mdata[,c("GEOID10","hinc70","hinc80","hinc90","hinc00","hinc10",
+                        "MPA70","MPA80","MPA90","MPA00","MPA10")],
+                        LnRR_biom70,LnRR_biom80,LnRR_biom90,LnRR_biom00,LnRR_biom10)
+  
+Mdata2 <- Mdata %>%
+  group_by(MPA) %>%
+  summarise(LnRR_biom70=mean(LnRR_biom70, na.rm=T))
+  
+# Gather by income census year
+data6 <-data2 %>% 
+  gather("hinc70","hinc80","hinc90","hinc00","hinc10", key = "Year", value = "HHIncome")
+
+# Check data
+summary(data6$HHIncome) 
+nrow(data2)*5==nrow(data6)
+
+# Prepare Year data 
+unique(data6$Year)
+data6$Year <- paste0('19',stringr::str_sub(data6$Year, -2, -1)) # create year variable
+data6$Year[data6$Year==1900]=2000 # fix 2000 and 2010
+data6$Year[data6$Year==1910]=2010
+unique(data6$Year)
+
+data6$Tr <- ifelse((data6$Year=='1970' & data6$GEOID10%in%data2$GEOID10[i.treat70]) |
+                   (data6$Year=='1980' & data6$GEOID10%in%data2$GEOID10[i.treat80]) |
+                   (data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat90]) |
+                   (data6$Year=='2000' & data6$GEOID10%in%data2$GEOID10[i.treat00]) | 
+                   (data6$Year=='2010' & data6$GEOID10%in%data2$GEOID10[i.treat10]),
+                   1,0)
+
+# Double check
+unique(data6$Tr[data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat70]])
+
+# Select columns
+data7 <- data6[,c("GEOID10","Tr","Year","HHIncome")]
+
+# summarise data
+data8 <- summarySE(data7, measurevar="HHIncome", groupvars=c("Year","Tr"))
+data8$MPA1 <- ifelse(data8$Tr==0,'Control','Matched')
+
+#Join with unmatched data
+data9 <- rbind(data5[,-2],data8[,-2])
+data9 <- subset(data9,MPA1!='Matched')
+arrange(data9,Year)
+
+pd <- position_dodge(width=.3) # move them .05 to the left and right
+pMPAincome2<- ggplot(data9, aes(x=Year, y=HHIncome, group=1, colour = factor(MPA1))) + 
+  geom_errorbar(aes(ymin=HHIncome-ci, ymax=HHIncome+ci), width=0, position = pd ) +
+  geom_point(size=2, position =pd)+ 
+  theme_bw() +
+  ylab('Household income') +
+  geom_hline(aes(yintercept=0)) +
+  theme(axis.title.x = element_text(size=12))
+pMPAincome2
+
+```
+
+#### Differences at each time step
+Matching at each time step gives us 5 snapshots of the inside/outside differences in MPA to non-MPA populations. 
+```{r eval=F}
+# Set Matching variables
+names(data2)
+Tr70 <- data2$MPA70
+Tr80 <- data2$MPA80
+Tr90 <- data2$MPA90
+Tr00 <- data2$MPA00
+Tr10 <- data2$MPA10
+X<-data2[,c('lat','long', 'hinc70','punemp70','mhmval70','Popdens70','pprof70','CITY_DIST','SHORE_DIST','BEACH_DIST','BchIndex','STATEFP10')]
+
+#Malanobis matching
+names(X)
+# Create caliper and say which matches should be exact
+# Caliper controls permissable match. Depth: matches only sites surveyed within a moving 10m window, SurveyYear:3 year window, Latitude: 2 degrees
+Xcaliper<-c(100,100,1,1,1,1,1,1,1,1,100,100)  # PAR included
+Xexact<-c(0,0,0,0,0,0,0,0,0,0,0,1)  # PAR included
+
+
+#m1<-Match(Y=NULL, Tr,X, M=1,caliper=Xcaliper, replace=TRUE, ties=TRUE)
+#summary(m1)
+m70<-Match(Y=NULL, Tr70,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m70)
+m80<-Match(Y=NULL, Tr80,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m80)
+m90<-Match(Y=NULL, Tr90,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m90)
+m00<-Match(Y=NULL, Tr00,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m00)
+m10<-Match(Y=NULL, Tr10,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m10)
+
+#Match balance
+mb70<-MatchBalance(Tr70~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb80<-MatchBalance(Tr80~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb90<-MatchBalance(Tr90~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb00<-MatchBalance(Tr00~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb10<-MatchBalance(Tr10~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+#mb2<-MatchBalance(Tr~lat+long+mhmval70+phaw70+Popdens70+MarketDist+pprof70+ppov70+hinc70,data=data1,match.out=m2,ks=TRUE, nboots=1000,digits=3)
+
+# index of treatment sites
+i.treat70<-m70$index.treated 
+i.treat80<-m80$index.treated                               
+i.treat90<-m90$index.treated                               
+i.treat00<-m00$index.treated                               
+i.treat10<-m10$index.treated                               
+# index of control sites 
+i.control70<-m70$index.control
+i.control80<-m80$index.control                              
+i.control90<-m90$index.control                              
+i.control00<-m00$index.control                              
+i.control10<-m10$index.control  
+
+# Distance between control and treatment sites
+T.Loc<-data2[i.treat70,c('long','lat')]
+C.Loc<-data2[i.control70,c('long','lat')]
+Dist<-(distGeo(T.Loc,C.Loc))/1000
+summary(Dist)
+hist(Dist,main="Distance between Control and Treatment Sites")
+
+
+# Gather by income census year
+data6 <-data2 %>% 
+  gather("hinc70","hinc80","hinc90","hinc00","hinc10", key = "Year", value = "HHIncome")
+
+# Check data
+summary(data6$HHIncome) 
+nrow(data2)*5==nrow(data6)
+
+# Prepare Year data 
+unique(data6$Year)
+data6$Year <- paste0('19',stringr::str_sub(data6$Year, -2, -1)) # create year variable
+data6$Year[data6$Year==1900]=2000 # fix 2000 and 2010
+data6$Year[data6$Year==1910]=2010
+unique(data6$Year)
+
+data6$Tr <- ifelse((data6$Year=='1970' & data6$GEOID10%in%data2$GEOID10[i.treat70]) |
+                   (data6$Year=='1980' & data6$GEOID10%in%data2$GEOID10[i.treat80]) |
+                   (data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat90]) |
+                   (data6$Year=='2000' & data6$GEOID10%in%data2$GEOID10[i.treat00]) | 
+                   (data6$Year=='2010' & data6$GEOID10%in%data2$GEOID10[i.treat10]),
+                   1,0)
+
+# Double check
+unique(data6$Tr[data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat70]])
+
+# Select columns
+data7 <- data6[,c("GEOID10","Tr","Year","HHIncome")]
+
+# summarise data
+data8 <- summarySE(data7, measurevar="HHIncome", groupvars=c("Year","Tr"))
+data8$MPA1 <- ifelse(data8$Tr==0,'Control','Matched')
+
+#Join with unmatched data
+data9 <- rbind(data5[,-2],data8[,-2])
+data9 <- subset(data9,MPA1!='Matched')
+arrange(data9,Year)
+
+pd <- position_dodge(width=.3) # move them .05 to the left and right
+pMPAincome2<- ggplot(data9, aes(x=Year, y=HHIncome, group=1, colour = factor(MPA1))) + 
+  geom_errorbar(aes(ymin=HHIncome-ci, ymax=HHIncome+ci), width=0, position = pd ) +
+  geom_point(size=2, position =pd)+ 
+  theme_bw() +
+  ylab('Household income') +
+  geom_hline(aes(yintercept=0)) +
+  theme(axis.title.x = element_text(size=12))
+pMPAincome2
+```
+
+#### Differences by 2010
+Using the 2010 match, looking at how MPA vs non-MPA populations have changed over time
+```{r eval=F}
+data2$Tr10 <- ifelse([i.treat10])
+
+# Gather by income census year
+data6 <-data2 %>% 
+  gather("hinc70","hinc80","hinc90","hinc00","hinc10", key = "Year", value = "HHIncome")
+
+# Check data
+summary(data6$HHIncome) 
+nrow(data2)*5==nrow(data6)
+
+# Prepare Year data 
+unique(data6$Year)
+data6$Year <- paste0('19',stringr::str_sub(data6$Year, -2, -1)) # create year variable
+data6$Year[data6$Year==1900]=2000 # fix 2000 and 2010
+data6$Year[data6$Year==1910]=2010
+unique(data6$Year)
+
+data6$Tr <- ifelse((data6$Year=='1970' & data6$GEOID10%in%data2$GEOID10[i.treat70]) |
+                   (data6$Year=='1980' & data6$GEOID10%in%data2$GEOID10[i.treat80]) |
+                   (data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat90]) |
+                   (data6$Year=='2000' & data6$GEOID10%in%data2$GEOID10[i.treat00]) | 
+                   (data6$Year=='2010' & data6$GEOID10%in%data2$GEOID10[i.treat10]),
+                   1,0)
+
+# Double check
+unique(data6$Tr[data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat70]])
+
+# Select columns
+data7 <- data6[,c("GEOID10","Tr","Year","HHIncome")]
+
+# summarise data
+data8 <- summarySE(data7, measurevar="HHIncome", groupvars=c("Year","Tr"))
+data8$MPA1 <- ifelse(data8$Tr==0,'Control','Matched')
+
+#Join with unmatched data
+data9 <- rbind(data5[,-2],data8[,-2])
+data9 <- subset(data9,MPA1!='Matched')
+arrange(data9,Year)
+
+pd <- position_dodge(width=.3) # move them .05 to the left and right
+pMPAincome2<- ggplot(data9, aes(x=Year, y=HHIncome, group=1, colour = factor(MPA1))) + 
+  geom_errorbar(aes(ymin=HHIncome-ci, ymax=HHIncome+ci), width=0, position = pd ) +
+  geom_point(size=2, position =pd)+ 
+  theme_bw() +
+  ylab('Household income') +
+  geom_hline(aes(yintercept=0)) +
+  theme(axis.title.x = element_text(size=12))
+pMPAincome2
+
+```
+
+#### Differences at each time step
+Matching at each time step gives us 5 snapshots of the inside/outside differences in MPA to non-MPA populations. 
+```{r eval=F}
+# Set Matching variables
+names(data2)
+Tr70 <- data2$MPA70
+Tr80 <- data2$MPA80
+Tr90 <- data2$MPA90
+Tr00 <- data2$MPA00
+Tr10 <- data2$MPA10
+X<-data2[,c('lat','long', 'hinc70','punemp70','mhmval70','Popdens70','pprof70','CITY_DIST','SHORE_DIST','BEACH_DIST','BchIndex','STATEFP10')]
+
+#Malanobis matching
+names(X)
+# Create caliper and say which matches should be exact
+# Caliper controls permissable match. Depth: matches only sites surveyed within a moving 10m window, SurveyYear:3 year window, Latitude: 2 degrees
+Xcaliper<-c(100,100,1,1,1,1,1,1,1,1,100,100)  # PAR included
+Xexact<-c(0,0,0,0,0,0,0,0,0,0,0,1)  # PAR included
+
+
+#m1<-Match(Y=NULL, Tr,X, M=1,caliper=Xcaliper, replace=TRUE, ties=TRUE)
+#summary(m1)
+m70<-Match(Y=NULL, Tr70,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m70)
+m80<-Match(Y=NULL, Tr80,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m80)
+m90<-Match(Y=NULL, Tr90,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m90)
+m00<-Match(Y=NULL, Tr00,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m00)
+m10<-Match(Y=NULL, Tr10,X, M=2, caliper=Xcaliper, exact = Xexact, replace=TRUE, ties=TRUE)
+summary(m10)
+
+#Match balance
+mb70<-MatchBalance(Tr70~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb80<-MatchBalance(Tr80~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb90<-MatchBalance(Tr90~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb00<-MatchBalance(Tr00~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+mb10<-MatchBalance(Tr10~lat+long+hinc70+mhmval70+Popdens70+pprof70+CITY_DIST+SHORE_DIST+BEACH_DIST+BchIndex,data=data2,match.out=m70,ks=TRUE, nboots=1000,digits=3)
+#mb2<-MatchBalance(Tr~lat+long+mhmval70+phaw70+Popdens70+MarketDist+pprof70+ppov70+hinc70,data=data1,match.out=m2,ks=TRUE, nboots=1000,digits=3)
+
+# index of treatment sites
+i.treat70<-m70$index.treated 
+i.treat80<-m80$index.treated                               
+i.treat90<-m90$index.treated                               
+i.treat00<-m00$index.treated                               
+i.treat10<-m10$index.treated                               
+# index of control sites 
+i.control70<-m70$index.control
+i.control80<-m80$index.control                              
+i.control90<-m90$index.control                              
+i.control00<-m00$index.control                              
+i.control10<-m10$index.control  
+
+# Distance between control and treatment sites
+T.Loc<-data2[i.treat70,c('long','lat')]
+C.Loc<-data2[i.control70,c('long','lat')]
+Dist<-(distGeo(T.Loc,C.Loc))/1000
+summary(Dist)
+hist(Dist,main="Distance between Control and Treatment Sites")
+
+
+# Gather by income census year
+data6 <-data2 %>% 
+  gather("hinc70","hinc80","hinc90","hinc00","hinc10", key = "Year", value = "HHIncome")
+
+# Check data
+summary(data6$HHIncome) 
+nrow(data2)*5==nrow(data6)
+
+# Prepare Year data 
+unique(data6$Year)
+data6$Year <- paste0('19',stringr::str_sub(data6$Year, -2, -1)) # create year variable
+data6$Year[data6$Year==1900]=2000 # fix 2000 and 2010
+data6$Year[data6$Year==1910]=2010
+unique(data6$Year)
+
+data6$Tr <- ifelse((data6$Year=='1970' & data6$GEOID10%in%data2$GEOID10[i.treat70]) |
+                   (data6$Year=='1980' & data6$GEOID10%in%data2$GEOID10[i.treat80]) |
+                   (data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat90]) |
+                   (data6$Year=='2000' & data6$GEOID10%in%data2$GEOID10[i.treat00]) | 
+                   (data6$Year=='2010' & data6$GEOID10%in%data2$GEOID10[i.treat10]),
+                   1,0)
+
+# Double check
+unique(data6$Tr[data6$Year=='1990' & data6$GEOID10%in%data2$GEOID10[i.treat70]])
+
+# Select columns
+data7 <- data6[,c("GEOID10","Tr","Year","HHIncome")]
+
+# summarise data
+data8 <- summarySE(data7, measurevar="HHIncome", groupvars=c("Year","Tr"))
+data8$MPA1 <- ifelse(data8$Tr==0,'Control','Matched')
+
+#Join with unmatched data
+data9 <- rbind(data5[,-2],data8[,-2])
+data9 <- subset(data9,MPA1!='Matched')
+arrange(data9,Year)
+
+pd <- position_dodge(width=.3) # move them .05 to the left and right
+pMPAincome2<- ggplot(data9, aes(x=Year, y=HHIncome, group=1, colour = factor(MPA1))) + 
+  geom_errorbar(aes(ymin=HHIncome-ci, ymax=HHIncome+ci), width=0, position = pd ) +
+  geom_point(size=2, position =pd)+ 
+  theme_bw() +
+  ylab('Household income') +
+  geom_hline(aes(yintercept=0)) +
+  theme(axis.title.x = element_text(size=12))
+pMPAincome2
+```
+
